@@ -13,6 +13,9 @@ public class Main {
     static int jsonFileNumber = 0;
     static String hostName;
 
+    static InputStream inputStream;
+    static OutputStream outputStream;
+
     public static void main(String[] args) {
         var URL_REGEX = Pattern.compile("(?i)(http://)?([-a-zA-Z0-9@:%._\\+~#=]{1,256}\\.[a-zA-Z0-9()]{1,6}\\b)([-a-zA-Z0-9()@:%_\\+.~#?&//=]*)");
         var VALID_METHODS = Set.of("GET", "POST", "PUT", "PATCH", "DELETE");
@@ -77,7 +80,7 @@ public class Main {
                         outStream.write(makeRequestMessage(method, resources, studentID));
                         outStream.flush();
 
-                        parseResponse(inStream, outStream);
+                        parseResponse(inStream, outStream, resources);
 
 //                        var inSc = new Scanner(inStream);
 //                        var response = new StringBuilder();
@@ -101,7 +104,7 @@ public class Main {
 
     }
 
-    private static void parseResponse(InputStream inStream, OutputStreamWriter outputStream, String filename) {
+    private static void parseResponse(InputStream inStream, OutputStreamWriter outputStream, String path) {
         var pattern = Pattern.compile("(HTTP/[12].[\\d+]) ([\\d]{3}) ([A-Za-z ]+)");
         Scanner in = new Scanner(inStream);
         var statusCode = "";
@@ -123,7 +126,7 @@ public class Main {
             if (line.startsWith("Content-Type")) {
                 var arr = line.split(":|;");
                 contentType = arr[1].trim();
-                parameter = arr[2].trim();
+//                parameter = arr[2].trim();
             }
             if (line.isEmpty())
                 isBody = true;
@@ -133,21 +136,24 @@ public class Main {
                 response.append(line).append(CRLF);
         }
 
+        var isHtml = false;
         if (contentType.equals("text/html")) {
-            htmlFileNumber++;
-            writeToFile(messageBody.toString(), ".html");
-            downloadLinkedResources(messageBody.toString(), inStream, outputStream);
+            isHtml = true;
+//            htmlFileNumber++;
+//            writeToFile(messageBody.toString(), ".html");
+
 
         } else if (contentType.equals("application/json")) {
             jsonFileNumber++;
-            writeToFile(messageBody.toString(), ".json");
+//            writeToFile(messageBody.toString(), ".json");
+            writeToFile(messageBody.toString(), path);
         } else if (contentType.equals("text/plain")) {
             response.append(messageBody);
         } else {
             /*
             Other MIME type formats should be downloaded.
              */
-
+            writeToFile(messageBody.toString(), path);
 
         }
 
@@ -163,15 +169,20 @@ public class Main {
             System.err.println("Server Error: " + statusText);
         }
 
+        if (isHtml) {
+            writeToFile(messageBody.toString(), path);
+            downloadLinkedResources(messageBody.toString());
+        }
+
     }
 
-    private static void downloadLinkedResources(String messageBody, InputStream inputStream, OutputStreamWriter outputStream) {
+    private static void downloadLinkedResources(String messageBody) {
 //        var scanner = new Scanner(inputStream);
 
         var pattern = Pattern.compile("^((?!www\\.|(?:http|ftp)s?://|[A-Za-z]:\\\\|//).*)");
 
         var doc = Jsoup.parse(messageBody);
-        var elements = doc.select("link, img, script, div[data-background]").select(":not([href^=https://])").select(":not([src^=https://])").select(":not(div[data-background^=https://])");
+        var elements = doc.select("link, img, script[src], div[data-background]").select(":not([href^=https://])").select(":not([src^=https://])").select(":not(div[data-background^=https://])");
         for (var element : elements) {
 //            if (element.tagName().equals("img") && element.hasAttr("data-src")) {
 //                /* 2 HTTP REQs:
@@ -186,16 +197,18 @@ public class Main {
             if (element.hasAttr("src")) {
                 value = element.attr("src");
             }
-            if (element.hasAttr("href")) {
+            else if (element.hasAttr("href")) {
                 value = element.attr("href");
 
             }
-            if (element.hasAttr("data-src")) {
+            else if (element.hasAttr("data-src")) {
                 value = element.attr("data-src");
 
             }
-            if (element.hasAttr("data-background")) {
+            else if (element.hasAttr("data-background")) {
                 value = element.attr("data-background");
+            }else {
+                continue;
             }
 
             var matchObj = pattern.matcher(value);
@@ -209,11 +222,13 @@ public class Main {
                     pure_url.deleteCharAt(pure_url.length() - 1);
 
                 var requestMessage = makeRequestMessage("GET", pure_url.toString(), "");
-                try {
-                    outputStream.write(requestMessage);
-                    outputStream.flush();
+                try (var socket = new Socket(hostName, PORT);
+                     var outStream = new OutputStreamWriter(socket.getOutputStream());
+                     var inStream = socket.getInputStream()) {
+                    outStream.write(requestMessage);
+                    outStream.flush();
 
-                    parseResponse(inputStream, outputStream, pure_url.toString());
+                    parseResponse(inStream, outStream, pure_url.toString());
 
                 } catch (IOException e) {
                     e.printStackTrace();
@@ -223,24 +238,58 @@ public class Main {
         }
     }
 
-    private static void writeToFile(String messageBody, String extension) {
-        var index = new StringBuilder();
+    private static void writeToFile(String messageBody, String path) {
+//        var index = new StringBuilder();
+//
+//        if (extension.equals(".html") && htmlFileNumber > 1)
+//            index.append("(").append(htmlFileNumber).append(")");
+//        else if (extension.equals(".json") && jsonFileNumber > 1)
+//            index.append("(").append(jsonFileNumber).append(")");
 
-        if (extension.equals(".html") && htmlFileNumber > 1)
-            index.append("(").append(htmlFileNumber).append(")");
-        else if (extension.equals(".json") && jsonFileNumber > 1)
-            index.append("(").append(jsonFileNumber).append(")");
+        var pattern = Pattern.compile("^\\/(.+\\/)*(.+)\\.(.+)$");
+        var matchObj = pattern.matcher(path);
+        if (matchObj.matches()) {
 
-        var fileName = new StringBuilder();
-        fileName.append("Server_Response").append(index).append(extension);
-        File file = new File(fileName.toString());
+            var directories = matchObj.group(1);
+            var filename = matchObj.group(2);
+            var extension = matchObj.group(3);
 
-        try (var fileWriter = new FileWriter(file)) {
-            fileWriter.write(messageBody);
-            fileWriter.flush();
-        } catch (IOException e) {
-            e.printStackTrace();
+            var finalPath = new StringBuilder();
+
+            if (directories != null && !directories.isEmpty()) {
+
+                File dir = new File(directories);
+
+                /* if directory doesn't exist, create it. */
+                if (!dir.exists()) {
+                    dir.mkdir();
+                }
+
+                finalPath.append(directories).append("/");
+            }
+
+            finalPath.append(filename).append(".").append(extension);
+            File file = new File(finalPath.toString());
+            try (FileWriter fileWriter = new FileWriter(file)) {
+                fileWriter.write(messageBody);
+                fileWriter.flush();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
         }
+
+
+//        var fileName = new StringBuilder();
+////        fileName.append("Server_Response").append(index).append(path);
+//        File file = new File(fileName.toString());
+//
+//        try (var fileWriter = new FileWriter(file)) {
+//            fileWriter.write(messageBody);
+//            fileWriter.flush();
+//        } catch (IOException e) {
+//            e.printStackTrace();
+//        }
     }
 
     private static String makeRequestMessage(String method, String path, String studentID) {
